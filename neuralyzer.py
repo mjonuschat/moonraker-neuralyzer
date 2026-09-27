@@ -272,3 +272,29 @@ def delete_and_correct(conn, job_id: int, rows: list[dict]) -> None:
         conn.commit()
     except Exception as exc:
         raise _CommitFailure(str(exc)) from exc
+
+
+class Neuralyzer:
+    def __init__(self, config) -> None:
+        self.server = config.get_server()
+        self.dry_run = config.getboolean("dry_run", False)
+        self.process_completed = config.getboolean("process_completed", False)
+
+        raw_lines = config.getlist("rules", DEFAULT_RULES)
+        try:
+            rule_defs = parse_rule_lines(raw_lines)
+        except ValueError as exc:
+            raise config.error(str(exc)) from exc
+
+        template_factory = self.server.lookup_component("template")
+        self.rules = [
+            Rule(name=name, source=expr, template=template_factory.create_template(expr))
+            for name, expr in rule_defs
+        ]
+
+        self.history = self.server.lookup_component("history")
+        self.tracked_jobs: set[int] = set()
+
+
+def load_component(config) -> Neuralyzer:
+    return Neuralyzer(config)
