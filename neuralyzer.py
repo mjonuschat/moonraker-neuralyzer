@@ -9,7 +9,10 @@ directly (``import neuralyzer``) by tests with no package scaffolding.
 """
 from __future__ import annotations
 
+import logging
 import re
+from dataclasses import dataclass
+from typing import Any
 
 RULE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 DEFAULT_RULES = ["no_extrusion = {job.filament_used <= 0}"]
@@ -35,3 +38,42 @@ def parse_rule_lines(lines: list[str]) -> list[tuple[str, str]]:
         seen.add(name)
         parsed.append((name, expr))
     return parsed
+
+
+@dataclass
+class Rule:
+    name: str
+    source: str
+    template: Any  # duck-typed: needs .render(context: dict) -> str
+
+
+def render_rule(rule: Rule, context: dict) -> bool:
+    """Render ``rule`` against ``context``; True only on exact "True".
+
+    Any render error (e.g. an ordering comparison against a missing
+    value) or non-boolean output is treated as no-match, never as a
+    match — a broken rule can only ever keep jobs, never delete them.
+    """
+    try:
+        result = rule.template.render(context)
+    except Exception:
+        logging.warning(
+            "neuralyzer: rule '%s' failed to render, treating as no match",
+            rule.name, exc_info=True,
+        )
+        return False
+    if result == "True":
+        return True
+    if result != "False":
+        logging.warning(
+            "neuralyzer: rule '%s' produced non-boolean output %r, "
+            "treating as no match", rule.name, result,
+        )
+    return False
+
+
+def first_match(rules: list[Rule], context: dict) -> Rule | None:
+    for rule in rules:
+        if render_rule(rule, context):
+            return rule
+    return None
