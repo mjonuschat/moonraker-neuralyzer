@@ -77,3 +77,22 @@ def first_match(rules: list[Rule], context: dict) -> Rule | None:
         if render_rule(rule, context):
             return rule
     return None
+
+
+def build_context(job: dict, tracked: bool) -> dict:
+    aux: dict[str, dict[str, Any]] = {}
+    for entry in job.get("auxiliary_data") or []:
+        provider = entry.get("provider")
+        name = entry.get("name")
+        if provider is None or name is None:
+            continue
+        aux.setdefault(provider, {})[name] = entry.get("value")
+
+    metadata = job.get("metadata") or {}
+    filament_total = metadata.get("filament_total")
+    filament_used = job.get("filament_used")
+    progress = None
+    if filament_total and filament_used is not None:
+        progress = filament_used / filament_total
+
+    return {"job": job, "tracked": tracked, "aux": aux, "progress": progress}
