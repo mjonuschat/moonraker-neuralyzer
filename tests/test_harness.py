@@ -1,13 +1,12 @@
 import asyncio
 
-import pytest
-
 
 async def test_history_table_queue_callback_is_fifo(fake_history):
     order = []
 
     def first(conn):
         import time
+
         time.sleep(0.05)
         order.append("first")
 
@@ -62,6 +61,7 @@ def test_fake_template_factory_renders_boolean_strings(fake_server):
 
 def test_fake_history_seeded_with_base_totals(fake_history):
     from neuralyzer import BASE_TOTALS
+
     assert fake_history.job_totals == BASE_TOTALS
     assert fake_history.aux_totals == []
     assert fake_history.current_job_id is None
@@ -72,11 +72,15 @@ async def test_fake_history_db_seeded_with_base_totals_rows(fake_history):
         return dict(
             (field, total)
             for field, total in conn.execute(
-                "SELECT field, total FROM job_totals WHERE provider = 'history'"
+                "SELECT field, total FROM job_totals "
+                "WHERE provider = 'history' AND total IS NOT NULL"
             ).fetchall()
         )
+
     rows = await fake_history.history_table.queue_callback(_read)
     assert rows == {
-        "total_jobs": 0, "total_time": 0.0,
-        "total_print_time": 0.0, "total_filament_used": 0.0,
+        "total_jobs": 0,
+        "total_time": 0.0,
+        "total_print_time": 0.0,
+        "total_filament_used": 0.0,
     }

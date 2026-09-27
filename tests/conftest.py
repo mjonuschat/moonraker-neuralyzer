@@ -25,8 +25,14 @@ CREATE TABLE job_totals (
 """
 
 _BOOLEAN_STATES = {
-    "1": True, "yes": True, "true": True, "on": True,
-    "0": False, "no": False, "false": False, "off": False,
+    "1": True,
+    "yes": True,
+    "true": True,
+    "on": True,
+    "0": False,
+    "no": False,
+    "false": False,
+    "off": False,
 }
 
 
@@ -127,9 +133,7 @@ class _FakeSqliteQueue:
         self._queue: "queue.Queue" = queue.Queue()
         self._gate = threading.Event()
         self._gate.set()
-        self._thread = threading.Thread(
-            target=self._run, args=(db_path,), daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, args=(db_path,), daemon=True)
         self._thread.start()
 
     def _run(self, db_path: str) -> None:
@@ -205,10 +209,11 @@ def fake_history(tmp_path, fake_server):
     db_path = str(tmp_path / "moonraker-test.db")
     conn = sqlite3.connect(db_path)
     conn.executescript(_SCHEMA)
-    # Seed the four total fields that track cumulative statistics.
-    # Although a real Moonraker DB has six job_totals rows (including
-    # longest_job and longest_print with NULL totals), the test suite
-    # only requires the four fields with non-NULL totals for now.
+    # Mirrors a real Moonraker DB's invariant: by the time any job has
+    # ever finished, all six job_totals rows already exist (finish_job's
+    # _update_job_totals() REPLACEs all of them on every call). Seeding
+    # them here means UPDATE-based tests exercise a real row match
+    # instead of a silent zero-row no-op.
     conn.executemany(
         "INSERT INTO job_totals VALUES (?, ?, ?, ?, ?)",
         [
@@ -216,6 +221,8 @@ def fake_history(tmp_path, fake_server):
             ("history", "total_time", None, 0.0, "default"),
             ("history", "total_print_time", None, 0.0, "default"),
             ("history", "total_filament_used", None, 0.0, "default"),
+            ("history", "longest_job", 0.0, None, "default"),
+            ("history", "longest_print", 0.0, None, "default"),
         ],
     )
     conn.commit()
@@ -230,4 +237,5 @@ def fake_history(tmp_path, fake_server):
 def make_config(fake_server):
     def _make(options: dict) -> FakeConfig:
         return FakeConfig(options, fake_server)
+
     return _make
