@@ -96,3 +96,68 @@ def build_context(job: dict, tracked: bool) -> dict:
         progress = filament_used / filament_total
 
     return {"job": job, "tracked": tracked, "aux": aux, "progress": progress}
+
+
+BASE_TOTALS = {
+    "total_jobs": 0,
+    "total_time": 0.0,
+    "total_print_time": 0.0,
+    "total_filament_used": 0.0,
+    "longest_job": 0.0,
+    "longest_print": 0.0,
+}
+
+
+def compute_job_delta(job: dict) -> dict:
+    return {
+        "total_jobs": 1,
+        "total_time": job.get("total_duration") or 0,
+        "total_print_time": job.get("print_duration") or 0,
+        "total_filament_used": job.get("filament_used") or 0,
+    }
+
+
+def apply_job_delta(job_totals: dict, delta: dict) -> dict:
+    applied = {}
+    for field, amount in delta.items():
+        current = job_totals.get(field, 0)
+        new_value = current - amount
+        if new_value < 0:
+            new_value = 0
+        applied[field] = current - new_value
+        job_totals[field] = new_value
+    return applied
+
+
+def compute_aux_deltas(job: dict, aux_totals: list[dict]) -> list[tuple[int, float]]:
+    deltas: list[tuple[int, float]] = []
+    for entry in job.get("auxiliary_data") or []:
+        provider = entry.get("provider")
+        name = entry.get("name")
+        value = entry.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        for idx, total_entry in enumerate(aux_totals):
+            if (
+                total_entry.get("provider") == provider
+                and total_entry.get("field") == name
+            ):
+                if total_entry.get("total") is not None:
+                    deltas.append((idx, value))
+                break
+    return deltas
+
+
+def apply_aux_deltas(
+    aux_totals: list[dict], deltas: list[tuple[int, float]]
+) -> list[tuple[int, float]]:
+    applied = []
+    for idx, amount in deltas:
+        entry = aux_totals[idx]
+        current = entry["total"]
+        new_value = current - amount
+        if new_value < 0:
+            new_value = 0
+        applied.append((idx, current - new_value))
+        entry["total"] = new_value
+    return applied
