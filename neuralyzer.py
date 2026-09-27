@@ -294,6 +294,9 @@ class Neuralyzer:
 
         self.history = self.server.lookup_component("history")
         self.tracked_jobs: set[int] = set()
+        self.server.register_event_handler(
+            "history:history_changed", self._on_history_changed
+        )
 
     async def _delete_job(self, job_id: int, job: dict, rule: Rule) -> None:
         job_totals_ref = self.history.job_totals
@@ -370,6 +373,31 @@ class Neuralyzer:
                 "neuralyzer: deleted job %s (%s), rule '%s'",
                 job.get("job_id"), job.get("filename"), rule.name,
             )
+
+    async def _on_history_changed(self, event_data: dict) -> None:
+        if event_data.get("action") != "finished":
+            return
+        job = event_data["job"]
+        job_id = int(job["job_id"], 16)
+        tracked = job_id in self.tracked_jobs
+        self.tracked_jobs.discard(job_id)
+
+        if job.get("status") == "completed" and not self.process_completed:
+            return
+
+        context = build_context(job, tracked)
+        rule = first_match(self.rules, context)
+        if rule is None:
+            return
+
+        if self.dry_run:
+            logging.info(
+                "neuralyzer: would delete job %s (%s), rule '%s'",
+                job.get("job_id"), job.get("filename"), rule.name,
+            )
+            return
+
+        await self._delete_job(job_id, job, rule)
 
 
 def load_component(config) -> Neuralyzer:
