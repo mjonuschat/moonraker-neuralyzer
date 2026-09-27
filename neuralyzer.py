@@ -7,6 +7,7 @@ Moonraker v0.11.0. This keeps the file a plain, standalone module that
 can be symlinked straight into ``moonraker/components/`` and imported
 directly (``import neuralyzer``) by tests with no package scaffolding.
 """
+
 from __future__ import annotations
 
 import logging
@@ -59,15 +60,17 @@ def render_rule(rule: Rule, context: dict) -> bool:
     except Exception:
         logging.warning(
             "neuralyzer: rule '%s' failed to render, treating as no match",
-            rule.name, exc_info=True,
+            rule.name,
+            exc_info=True,
         )
         return False
     if result == "True":
         return True
     if result != "False":
         logging.warning(
-            "neuralyzer: rule '%s' produced non-boolean output %r, "
-            "treating as no match", rule.name, result,
+            "neuralyzer: rule '%s' produced non-boolean output %r, treating as no match",
+            rule.name,
+            result,
         )
     return False
 
@@ -138,10 +141,7 @@ def compute_aux_deltas(job: dict, aux_totals: list[dict]) -> list[tuple[int, flo
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
         for idx, total_entry in enumerate(aux_totals):
-            if (
-                total_entry.get("provider") == provider
-                and total_entry.get("field") == name
-            ):
+            if total_entry.get("provider") == provider and total_entry.get("field") == name:
                 if total_entry.get("total") is not None:
                     deltas.append((idx, value))
                 break
@@ -161,3 +161,114 @@ def apply_aux_deltas(
         applied.append((idx, current - new_value))
         entry["total"] = new_value
     return applied
+
+
+class _PreCommitFailure(Exception):
+    """The delete/update failed before commit; safely rolled back."""
+
+
+class _CommitFailure(Exception):
+    """The commit itself failed; outcome on disk is unknown."""
+
+
+_DELETE_SQL = "DELETE FROM job_history WHERE job_id = ?"
+_UPDATE_SQL = (
+    "UPDATE job_totals SET maximum = :maximum, total = :total "
+    "WHERE provider = :provider AND field = :field AND instance_id = :instance_id"
+)
+
+
+def build_update_rows(
+    job_fields,
+    job_totals: dict,
+    aux_totals: list[dict],
+    aux_indices: list[int],
+    instance: str = "default",
+) -> list[dict]:
+    rows = [
+        {
+            "maximum": None,
+            "total": job_totals[field],
+            "provider": "history",
+            "field": field,
+            "instance_id": instance,
+        }
+        for field in job_fields
+    ]
+    for idx in aux_indices:
+        entry = aux_totals[idx]
+        rows.append(
+            {
+                "maximum": entry["maximum"],
+                "total": entry["total"],
+                "provider": entry["provider"],
+                "field": entry["field"],
+                "instance_id": instance,
+            }
+        )
+    return rows
+
+
+def delete_and_correct(conn, job_id: int, rows: list[dict]) -> None:
+    """Delete a job and correct totals atomically, on the DB thread.
+
+    Runs synchronously inside a single ``queue_callback`` so the
+    SAVEPOINT, the DELETE, and the UPDATEs are one item on Moonraker's
+    FIFO SQLite command queue — never interleaved with another
+    writer's statements. ``conn`` is duck-typed (any object exposing
+    ``execute``/``commit`` like ``sqlite3.Connection``) so tests can
+    substitute a thin proxy to force a commit failure.
+
+    Only the DELETE's row count is checked. A totals UPDATE matching
+    zero rows is not an error: it happens, by design, during the brief
+    window of a totals reset (History's own DELETE + INSERT on
+    job_totals are two separate queue items), and the reset's INSERT
+    is the correct outcome in that case.
+
+    The SAVEPOINT statement and the success-path RELEASE both live
+    *inside* the same try/except as the DELETE and UPDATEs — not just
+    after it — so that even a failure opening or releasing the
+    savepoint itself is classified as `_PreCommitFailure` rather than
+    propagating raw and leaving the caller's already-applied in-memory
+    totals delta un-reverted.
+
+    If the recovery `ROLLBACK TO`/`RELEASE` itself fails, the outcome
+    is genuinely unknown — the DELETE/UPDATEs may or may not have
+    landed — so that case is deliberately raised as `_CommitFailure`,
+    not `_PreCommitFailure`: `_delete_job` treats `_CommitFailure` as
+    "log and do not compensate," which is the only safe response when
+    we can no longer prove nothing was persisted. Treating a failed
+    rollback as safe-to-compensate would risk re-adding a totals delta
+    on top of a DELETE that actually committed.
+
+    A failure of the `SAVEPOINT` statement itself is a separate case:
+    if the savepoint never opened, no statement after it had a chance
+    to run, so there is nothing to roll back and the failure is always
+    safe to compensate — `savepoint_opened` tracks this so that case
+    goes straight to `_PreCommitFailure` without attempting (and
+    necessarily failing) a `ROLLBACK TO` a savepoint that was never
+    opened.
+    """
+    savepoint_opened = False
+    try:
+        conn.execute("SAVEPOINT neuralyzer")
+        savepoint_opened = True
+        cursor = conn.execute(_DELETE_SQL, (job_id,))
+        if cursor.rowcount == 0:
+            raise RuntimeError(f"no job_history row for job_id {job_id}")
+        for row in rows:
+            conn.execute(_UPDATE_SQL, row)
+        conn.execute("RELEASE neuralyzer")
+    except Exception as exc:
+        if not savepoint_opened:
+            raise _PreCommitFailure(str(exc)) from exc
+        try:
+            conn.execute("ROLLBACK TO neuralyzer")
+            conn.execute("RELEASE neuralyzer")
+        except Exception as rollback_exc:
+            raise _CommitFailure(str(rollback_exc)) from exc
+        raise _PreCommitFailure(str(exc)) from exc
+    try:
+        conn.commit()
+    except Exception as exc:
+        raise _CommitFailure(str(exc)) from exc
