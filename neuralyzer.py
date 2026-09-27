@@ -295,6 +295,82 @@ class Neuralyzer:
         self.history = self.server.lookup_component("history")
         self.tracked_jobs: set[int] = set()
 
+    async def _delete_job(self, job_id: int, job: dict, rule: Rule) -> None:
+        job_totals_ref = self.history.job_totals
+
+        job_delta = compute_job_delta(job)
+        applied_job_delta = apply_job_delta(self.history.job_totals, job_delta)
+        aux_deltas = compute_aux_deltas(job, self.history.aux_totals)
+        applied_aux_deltas = apply_aux_deltas(self.history.aux_totals, aux_deltas)
+
+        rows = build_update_rows(
+            applied_job_delta.keys(),
+            self.history.job_totals,
+            self.history.aux_totals,
+            [idx for idx, _ in applied_aux_deltas],
+        )
+
+        def _run(conn):
+            delete_and_correct(conn, job_id, rows)
+
+        try:
+            await self.history.history_table.queue_callback(_run)
+        except _PreCommitFailure:
+            # job_totals (the dict) is only ever replaced wholesale by a
+            # totals reset -- a normal finish_job() mutates it in place.
+            # aux_totals (the list), by contrast, is rebuilt as a new
+            # list object on *every* finish, so its identity can't be
+            # used as a reset signal: a reset is detected purely via
+            # job_totals, and the aux delta is re-added into whichever
+            # aux_totals list is current, at the index captured before
+            # the await (stable, since History rebuilds it in the same
+            # fixed field order every time).
+            reset_happened = self.history.job_totals is not job_totals_ref
+            revert_job_fields: list[str] = []
+            revert_aux_indices: list[int] = []
+            if not reset_happened:
+                for field, amount in applied_job_delta.items():
+                    self.history.job_totals[field] += amount
+                revert_job_fields = list(applied_job_delta.keys())
+                for idx, amount in applied_aux_deltas:
+                    self.history.aux_totals[idx]["total"] += amount
+                revert_aux_indices = [idx for idx, _ in applied_aux_deltas]
+
+            revert_rows = build_update_rows(
+                revert_job_fields,
+                self.history.job_totals,
+                self.history.aux_totals,
+                revert_aux_indices,
+            )
+
+            def _persist_revert(conn):
+                for row in revert_rows:
+                    conn.execute(_UPDATE_SQL, row)
+                conn.commit()
+
+            try:
+                if revert_rows:
+                    await self.history.history_table.queue_callback(_persist_revert)
+            except Exception:
+                logging.error(
+                    "neuralyzer: failed to persist reverted totals for job %s",
+                    job.get("job_id"), exc_info=True,
+                )
+            logging.warning(
+                "neuralyzer: failed to delete job %s, keeping it in history",
+                job.get("job_id"),
+            )
+        except _CommitFailure:
+            logging.error(
+                "neuralyzer: commit failed while deleting job %s, totals may "
+                "be inconsistent", job.get("job_id"), exc_info=True,
+            )
+        else:
+            logging.info(
+                "neuralyzer: deleted job %s (%s), rule '%s'",
+                job.get("job_id"), job.get("filename"), rule.name,
+            )
+
 
 def load_component(config) -> Neuralyzer:
     return Neuralyzer(config)
