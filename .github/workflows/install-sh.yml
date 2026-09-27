@@ -1,0 +1,50 @@
+name: install.sh
+
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - "scripts/kpi.sh"
+      - "scripts/kpi.sh.sha256"
+      - "scripts/install.logic.sh"
+      - "install.sh"
+      - "Makefile"
+      - "tests/test_install.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/install-sh.yml"
+  pull_request:
+    paths:
+      - "scripts/kpi.sh"
+      - "scripts/kpi.sh.sha256"
+      - "scripts/install.logic.sh"
+      - "install.sh"
+      - "Makefile"
+      - "tests/test_install.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/install-sh.yml"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify vendored kpi.sh checksum
+        run: sha256sum -c kpi.sh.sha256
+        working-directory: scripts
+
+      - name: Regenerate install.sh and check it matches the committed file
+        run: |
+          make install.sh
+          git diff --exit-code install.sh
+
+      - name: Shellcheck install.sh
+        run: shellcheck install.sh
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Run install.sh tests
+        run: uv run pytest tests/test_install.py -v

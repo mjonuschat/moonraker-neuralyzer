@@ -36,6 +36,8 @@ def parse_rule_lines(lines: list[str]) -> list[tuple[str, str]]:
             raise ValueError(f"invalid rule name: {name!r}")
         if name in seen:
             raise ValueError(f"duplicate rule name: {name!r}")
+        if not expr:
+            raise ValueError(f"malformed rule line, missing '=': {line!r}")
         seen.add(name)
         parsed.append((name, expr))
     return parsed
@@ -294,9 +296,8 @@ class Neuralyzer:
 
         self.history = self.server.lookup_component("history")
         self.tracked_jobs: set[int] = set()
-        self.server.register_event_handler(
-            "history:history_changed", self._on_history_changed
-        )
+        self.server.register_event_handler("history:history_changed", self._on_history_changed)
+        self.server.register_remote_method("neuralyzer_start_tracking", self._on_start_tracking)
 
     async def _delete_job(self, job_id: int, job: dict, rule: Rule) -> None:
         job_totals_ref = self.history.job_totals
@@ -357,7 +358,8 @@ class Neuralyzer:
             except Exception:
                 logging.error(
                     "neuralyzer: failed to persist reverted totals for job %s",
-                    job.get("job_id"), exc_info=True,
+                    job.get("job_id"),
+                    exc_info=True,
                 )
             logging.warning(
                 "neuralyzer: failed to delete job %s, keeping it in history",
@@ -365,14 +367,23 @@ class Neuralyzer:
             )
         except _CommitFailure:
             logging.error(
-                "neuralyzer: commit failed while deleting job %s, totals may "
-                "be inconsistent", job.get("job_id"), exc_info=True,
+                "neuralyzer: commit failed while deleting job %s, totals may be inconsistent",
+                job.get("job_id"),
+                exc_info=True,
             )
         else:
             logging.info(
                 "neuralyzer: deleted job %s (%s), rule '%s'",
-                job.get("job_id"), job.get("filename"), rule.name,
+                job.get("job_id"),
+                job.get("filename"),
+                rule.name,
             )
+
+    def _on_start_tracking(self, **kwargs) -> None:
+        job_id = self.history.current_job_id
+        if job_id is None:
+            return
+        self.tracked_jobs.add(job_id)
 
     async def _on_history_changed(self, event_data: dict) -> None:
         if event_data.get("action") != "finished":
@@ -393,7 +404,9 @@ class Neuralyzer:
         if self.dry_run:
             logging.info(
                 "neuralyzer: would delete job %s (%s), rule '%s'",
-                job.get("job_id"), job.get("filename"), rule.name,
+                job.get("job_id"),
+                job.get("filename"),
+                rule.name,
             )
             return
 

@@ -1,6 +1,7 @@
 import asyncio
 import sqlite3
 
+import neuralyzer
 from neuralyzer import Rule, load_component
 
 
@@ -8,6 +9,7 @@ async def _seed_job(fake_history, job_id: int, status: str = "cancelled") -> Non
     def _insert(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT INTO job_history VALUES (?, ?)", (job_id, status))
         conn.commit()
+
     await fake_history.history_table.queue_callback(_insert)
 
 
@@ -25,13 +27,13 @@ async def test_delete_job_removes_row_and_corrects_totals(make_config, fake_hist
 
     def _check(conn):
         return conn.execute("SELECT * FROM job_history WHERE job_id = 26").fetchone()
+
     remaining = await fake_history.history_table.queue_callback(_check)
     assert remaining is None
 
     def _totals(conn):
-        return conn.execute(
-            "SELECT total FROM job_totals WHERE field = 'total_jobs'"
-        ).fetchone()
+        return conn.execute("SELECT total FROM job_totals WHERE field = 'total_jobs'").fetchone()
+
     row = await fake_history.history_table.queue_callback(_totals)
     assert row[0] == 4
 
@@ -50,9 +52,8 @@ async def test_delete_job_missing_row_reverts_in_memory_totals(make_config, fake
     assert fake_history.job_totals["total_time"] == 500.0
 
     def _totals(conn):
-        return conn.execute(
-            "SELECT total FROM job_totals WHERE field = 'total_jobs'"
-        ).fetchone()
+        return conn.execute("SELECT total FROM job_totals WHERE field = 'total_jobs'").fetchone()
+
     row = await fake_history.history_table.queue_callback(_totals)
     assert row[0] == 5  # the revert was persisted, not just kept in memory
 
@@ -78,6 +79,7 @@ async def test_delete_job_skips_reverting_job_totals_replaced_by_a_reset(make_co
     assert fake_history.job_totals["total_jobs"] == 4  # delta already applied
 
     from neuralyzer import BASE_TOTALS
+
     fake_history.job_totals = dict(BASE_TOTALS)  # a reset replaces the dict
 
     fake_history.resume()
@@ -97,11 +99,13 @@ async def test_delete_job_reapplies_aux_delta_into_a_list_replaced_by_a_normal_f
     delta — in memory AND on disk — in whatever aux_totals list is
     current, using the index captured before the await, gated solely
     on whether job_totals (the one reliable reset signal) was replaced."""
+
     def _seed_aux_row(conn):
         conn.execute(
             "INSERT INTO job_totals VALUES ('power_meter', 'energy', NULL, 10.0, 'default')"
         )
         conn.commit()
+
     await fake_history.history_table.queue_callback(_seed_aux_row)
 
     fake_history.aux_totals = [
@@ -109,7 +113,10 @@ async def test_delete_job_reapplies_aux_delta_into_a_list_replaced_by_a_normal_f
     ]
     neuralyzer = load_component(make_config({}))
     job = {
-        "job_id": "000001", "total_duration": 0, "print_duration": 0, "filament_used": 0,
+        "job_id": "000001",
+        "total_duration": 0,
+        "print_duration": 0,
+        "filament_used": 0,
         "auxiliary_data": [{"provider": "power_meter", "name": "energy", "value": 4.0}],
     }
     rule = Rule(name="no_extrusion", source="", template=None)
@@ -136,8 +143,43 @@ async def test_delete_job_reapplies_aux_delta_into_a_list_replaced_by_a_normal_f
         return conn.execute(
             "SELECT total FROM job_totals WHERE provider = 'power_meter' AND field = 'energy'"
         ).fetchone()
+
     row = await fake_history.history_table.queue_callback(_read_aux_row)
     assert row[0] == 10.0  # the revert was persisted, not just kept in memory
+
+
+async def test_delete_job_commit_failure_does_not_compensate(
+    monkeypatch, make_config, fake_history
+):
+    """A _CommitFailure means the outcome on disk is unknown -- the DELETE
+    may or may not have landed -- so _delete_job must log and leave the
+    already-applied in-memory delta alone rather than risk re-adding it
+    on top of a write that actually committed."""
+
+    def _raise_commit_failure(conn, job_id, rows):
+        raise neuralyzer._CommitFailure("simulated commit failure")
+
+    monkeypatch.setattr(neuralyzer, "delete_and_correct", _raise_commit_failure)
+
+    await _seed_job(fake_history, 26)
+    fake_history.job_totals.update({"total_jobs": 5, "total_time": 500.0})
+    component = load_component(make_config({}))
+    job = {"job_id": "00001A", "total_duration": 120.0, "print_duration": 90.0, "filament_used": 0}
+    rule = Rule(name="no_extrusion", source="", template=None)
+
+    await component._delete_job(26, job, rule)
+
+    # Delta was applied once, never reverted: no compensation happened.
+    assert fake_history.job_totals["total_jobs"] == 4
+    assert fake_history.job_totals["total_time"] == 380.0
+
+    def _check(conn):
+        return conn.execute("SELECT * FROM job_history WHERE job_id = 26").fetchone()
+
+    # The row is still there -- delete_and_correct never actually ran --
+    # proving no second queue_callback tried to persist a revert either.
+    remaining = await fake_history.history_table.queue_callback(_check)
+    assert remaining is not None
 
 
 async def test_concurrent_history_write_during_a_successful_delete_loses_neither_update(
@@ -151,9 +193,11 @@ async def test_concurrent_history_write_during_a_successful_delete_loses_neither
     after neuralyzer's own (the command queue is FIFO), so it must be
     based on neuralyzer's already-corrected in-memory values and must
     not be clobbered by (or clobber) neuralyzer's own persisted row."""
+
     def _seed(conn):
         conn.execute("INSERT INTO job_history VALUES (26, 'cancelled')")
         conn.commit()
+
     await fake_history.history_table.queue_callback(_seed)
     fake_history.job_totals.update({"total_jobs": 1, "total_time": 100.0})
 
@@ -184,6 +228,7 @@ async def test_concurrent_history_write_during_a_successful_delete_loses_neither
             (fake_history.job_totals["total_time"],),
         )
         conn.commit()
+
     history_write = fake_history.history_table.queue_callback(_history_finish_write)
 
     fake_history.resume()
@@ -193,9 +238,12 @@ async def test_concurrent_history_write_during_a_successful_delete_loses_neither
     # Final persisted totals reflect BOTH neuralyzer's correction and
     # History's own addition -- neither update was lost.
     def _read(conn):
-        return dict(conn.execute(
-            "SELECT field, total FROM job_totals WHERE provider = 'history'"
-        ).fetchall())
+        return dict(
+            conn.execute(
+                "SELECT field, total FROM job_totals WHERE provider = 'history'"
+            ).fetchall()
+        )
+
     persisted = await fake_history.history_table.queue_callback(_read)
     assert persisted["total_jobs"] == 1
     assert persisted["total_time"] == 50.0
@@ -224,11 +272,13 @@ async def test_concurrent_history_write_during_a_failed_delete_loses_neither_upd
     Python-level data race against neuralyzer's own compensation code,
     which mutates that same dict on the event-loop thread once #1
     fails."""
+
     def _seed_row(conn):
         conn.execute(
             "UPDATE job_totals SET total = 5 WHERE provider = 'history' AND field = 'total_jobs'"
         )
         conn.commit()
+
     await fake_history.history_table.queue_callback(_seed_row)
     fake_history.job_totals["total_jobs"] = 5
 
@@ -252,6 +302,7 @@ async def test_concurrent_history_write_during_a_failed_delete_loses_neither_upd
             (history_value,),
         )
         conn.commit()
+
     history_write = fake_history.history_table.queue_callback(_history_finish_write)
 
     fake_history.resume()
@@ -269,5 +320,6 @@ async def test_concurrent_history_write_during_a_failed_delete_loses_neither_upd
         return conn.execute(
             "SELECT total FROM job_totals WHERE provider = 'history' AND field = 'total_jobs'"
         ).fetchone()
+
     row = await fake_history.history_table.queue_callback(_read)
     assert row[0] == 6

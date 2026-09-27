@@ -1,6 +1,6 @@
 import pytest
 
-from neuralyzer import Neuralyzer, load_component
+from neuralyzer import load_component
 
 
 def test_loads_with_default_config(make_config, fake_history):
@@ -19,9 +19,11 @@ def test_reads_dry_run_and_process_completed(make_config, fake_history):
 
 
 def test_custom_rules_replace_default(make_config, fake_history):
-    config = make_config({
-        "rules": "barely_started = {progress < 0.02}\nuntracked = {not tracked}",
-    })
+    config = make_config(
+        {
+            "rules": "barely_started = {progress < 0.02}\nuntracked = {not tracked}",
+        }
+    )
     neuralyzer = load_component(config)
     assert [r.name for r in neuralyzer.rules] == ["barely_started", "untracked"]
 

@@ -92,22 +92,29 @@ async def test_job_id_hex_conversion(make_config, fake_history):
 
 async def test_end_to_end_deletes_real_row_through_real_delete_job(make_config, fake_history):
     """Full integration: no mocking of _delete_job, real fake DB."""
+
     def _seed(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT INTO job_history VALUES (26, 'cancelled')")
         conn.commit()
+
     await fake_history.history_table.queue_callback(_seed)
     fake_history.job_totals.update({"total_jobs": 1, "total_time": 100.0})
 
     neuralyzer = load_component(make_config({}))
-    await neuralyzer._on_history_changed({
-        "action": "finished",
-        "job": _job("00001A", "cancelled", filament_used=0, total_duration=100.0, print_duration=80.0),
-    })
+    await neuralyzer._on_history_changed(
+        {
+            "action": "finished",
+            "job": _job(
+                "00001A", "cancelled", filament_used=0, total_duration=100.0, print_duration=80.0
+            ),
+        }
+    )
 
     assert fake_history.job_totals["total_jobs"] == 0
 
     def _check(conn):
         return conn.execute("SELECT * FROM job_history WHERE job_id = 26").fetchone()
+
     assert await fake_history.history_table.queue_callback(_check) is None
 
 
@@ -124,8 +131,10 @@ async def test_print_stats_reset_on_cancelled_job_documented_behavior(make_confi
 
     neuralyzer._delete_job = _fake_delete
     # filament_used == 0 here stands in for "stats were reset", per spec.
-    await neuralyzer._on_history_changed({
-        "action": "finished",
-        "job": _job("000001", "cancelled", filament_used=0),
-    })
+    await neuralyzer._on_history_changed(
+        {
+            "action": "finished",
+            "job": _job("000001", "cancelled", filament_used=0),
+        }
+    )
     assert calls == [1]

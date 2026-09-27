@@ -9,16 +9,18 @@ def test_parses_single_rule():
 
 
 def test_equals_inside_expression_is_kept():
-    parsed = parse_rule_lines(["untracked = {job.status == \"cancelled\"}"])
-    assert parsed == [("untracked", "{job.status == \"cancelled\"}")]
+    parsed = parse_rule_lines(['untracked = {job.status == "cancelled"}'])
+    assert parsed == [("untracked", '{job.status == "cancelled"}')]
 
 
 def test_duplicate_names_rejected():
     with pytest.raises(ValueError, match="duplicate"):
-        parse_rule_lines([
-            "no_extrusion = {job.filament_used <= 0}",
-            "no_extrusion = {job.filament_used < 1}",
-        ])
+        parse_rule_lines(
+            [
+                "no_extrusion = {job.filament_used <= 0}",
+                "no_extrusion = {job.filament_used < 1}",
+            ]
+        )
 
 
 def test_invalid_name_rejected():
@@ -33,3 +35,8 @@ def test_default_rules_parse_cleanly():
 
 def test_empty_list_gives_no_rules():
     assert parse_rule_lines([]) == []
+
+
+def test_missing_equals_rejected():
+    with pytest.raises(ValueError, match="malformed"):
+        parse_rule_lines(["bareword"])
