@@ -88,3 +88,82 @@ async def test_interleaved_finished_and_added_evaluate_own_tracking_state(
 
     assert await fake_history.history_table.queue_callback(_check_b) is not None  # B kept
     assert neuralyzer.tracked_jobs == set()
+
+
+async def test_signal_before_job_id_exists_is_applied_when_job_added(make_config, fake_history):
+    neuralyzer = load_component(make_config({}))
+    fake_history.current_job_id = None
+    neuralyzer._on_start_tracking()
+
+    fake_history.current_job_id = 10
+    await neuralyzer._on_history_changed({"action": "added", "job": {"job_id": "00000A"}})
+
+    assert neuralyzer.tracked_jobs == {10}
+
+
+async def test_early_signal_applies_to_one_job_only(make_config, fake_history):
+    neuralyzer = load_component(make_config({}))
+    fake_history.current_job_id = None
+    neuralyzer._on_start_tracking()
+
+    fake_history.current_job_id = 10
+    await neuralyzer._on_history_changed({"action": "added", "job": {"job_id": "00000A"}})
+    fake_history.current_job_id = 11
+    await neuralyzer._on_history_changed({"action": "added", "job": {"job_id": "00000B"}})
+
+    assert neuralyzer.tracked_jobs == {10}
+
+
+async def test_early_signal_survives_a_slow_job_save(make_config, fake_history):
+    neuralyzer = load_component(make_config({}))
+    fake_history.current_job_id = None
+    neuralyzer._on_start_tracking(state="printing")
+
+    await asyncio.sleep(0.05)
+    fake_history.current_job_id = 10
+    await neuralyzer._on_history_changed({"action": "added", "job": {"job_id": "00000A"}})
+
+    assert neuralyzer.tracked_jobs == {10}
+
+
+async def test_signal_outside_printing_state_is_ignored(make_config, fake_history):
+    neuralyzer = load_component(make_config({}))
+    fake_history.current_job_id = None
+    neuralyzer._on_start_tracking(state="standby")
+
+    fake_history.current_job_id = 10
+    await neuralyzer._on_history_changed({"action": "added", "job": {"job_id": "00000A"}})
+
+    assert neuralyzer.tracked_jobs == set()
+
+
+async def test_signal_outside_printing_state_ignored_even_with_current_job(
+    make_config, fake_history
+):
+    neuralyzer = load_component(make_config({}))
+    fake_history.current_job_id = 5
+    neuralyzer._on_start_tracking(state="complete")
+
+    assert neuralyzer.tracked_jobs == set()
+
+
+async def test_printing_state_tracks_current_job(make_config, fake_history):
+    neuralyzer = load_component(make_config({}))
+    fake_history.current_job_id = 5
+    neuralyzer._on_start_tracking(state="printing")
+
+    assert neuralyzer.tracked_jobs == {5}
+
+
+async def test_stale_added_event_does_not_consume_early_signal(make_config, fake_history):
+    neuralyzer = load_component(make_config({}))
+    fake_history.current_job_id = None
+    neuralyzer._on_start_tracking(state="printing")
+
+    await neuralyzer._on_history_changed({"action": "added", "job": {"job_id": "000009"}})
+    assert neuralyzer.tracked_jobs == set()
+
+    fake_history.current_job_id = 10
+    await neuralyzer._on_history_changed({"action": "added", "job": {"job_id": "00000A"}})
+
+    assert neuralyzer.tracked_jobs == {10}

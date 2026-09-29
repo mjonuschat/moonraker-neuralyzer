@@ -296,6 +296,7 @@ class Neuralyzer:
 
         self.history = self.server.lookup_component("history")
         self.tracked_jobs: set[int] = set()
+        self._early_signal_pending = False
         self.server.register_event_handler("history:history_changed", self._on_history_changed)
         self.server.register_remote_method("neuralyzer_start_tracking", self._on_start_tracking)
 
@@ -379,13 +380,24 @@ class Neuralyzer:
                 rule.name,
             )
 
-    def _on_start_tracking(self, **kwargs) -> None:
+    def _on_start_tracking(self, state: str | None = None, **kwargs) -> None:
+        if state is not None and state != "printing":
+            return
         job_id = self.history.current_job_id
         if job_id is None:
+            # Moonraker assigns current_job_id only after an async DB save,
+            # so start gcode can signal first; the "added" event applies it.
+            self._early_signal_pending = True
             return
         self.tracked_jobs.add(job_id)
 
     async def _on_history_changed(self, event_data: dict) -> None:
+        if event_data.get("action") == "added":
+            added_id = int(event_data["job"]["job_id"], 16)
+            if self._early_signal_pending and added_id == self.history.current_job_id:
+                self._early_signal_pending = False
+                self.tracked_jobs.add(added_id)
+            return
         if event_data.get("action") != "finished":
             return
         job = event_data["job"]

@@ -22,8 +22,10 @@ Optionally, add this macro to `printer.cfg` and call `NEURALYZER_START` from you
 [gcode_macro NEURALYZER_START]
 description: Signal to moonraker-neuralyzer that the real print has started
 gcode:
-    {action_call_remote_method("neuralyzer_start_tracking")}
+    {action_call_remote_method("neuralyzer_start_tracking", state=printer.print_stats.state)}
 ```
+
+The macro passes Klipper's live print state so a call made while no print is running is ignored. A macro without the `state` argument still works, but it loses that protection.
 
 This lets rules ask whether a print ever reached that point through the `tracked` variable. Without it, `tracked` is always false, so a rule like `untracked` below would delete every cancelled or errored print, including real ones.
 
