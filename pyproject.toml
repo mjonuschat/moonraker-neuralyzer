@@ -1,7 +1,11 @@
 [project]
 name = "moonraker-neuralyzer"
 version = "0.1.0"
-requires-python = ">=3.10"
+description = "A Moonraker component that removes junk print jobs from history"
+readme = "README.md"
+license = "GPL-3.0-only"
+authors = [{ name = "Morton Jonuschat" }]
+requires-python = ">=3.9"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
@@ -9,7 +13,7 @@ asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
