@@ -1,3 +1,9 @@
+# moonraker-neuralyzer: delete junk print jobs from Moonraker's history
+#
+# Copyright (C) 2026 Morton Jonuschat
+#
+# This file may be distributed under the terms of the GNU GPLv3 license.
+
 """Moonraker component: delete junk print jobs from history.
 
 Deliberately imports nothing from the ``moonraker`` package — every
