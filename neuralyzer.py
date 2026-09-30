@@ -4,34 +4,18 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-"""Moonraker component: delete junk print jobs from history.
-
-Deliberately imports nothing from the ``moonraker`` package — every
-Moonraker object (config, server, history, template factory) is used
-purely by duck typing, matching the shapes those objects have in
-Moonraker v0.11.0. This keeps the file a plain, standalone module that
-can be symlinked straight into ``moonraker/components/`` and imported
-directly (``import neuralyzer``) by tests with no package scaffolding.
-"""
-
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 RULE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 DEFAULT_RULES = ["no_extrusion = {job.filament_used <= 0}"]
 
 
 def parse_rule_lines(lines: list[str]) -> list[tuple[str, str]]:
-    """Parse ``name = {expr}`` lines into ``(name, expr)`` pairs.
-
-    Splits each line at the first ``=`` (an expression may itself
-    contain ``==``, since names can't). Rejects duplicate or
-    non-``[A-Za-z0-9_]+`` names.
-    """
     parsed: list[tuple[str, str]] = []
     seen: set[str] = set()
     for line in lines:
@@ -49,20 +33,18 @@ def parse_rule_lines(lines: list[str]) -> list[tuple[str, str]]:
     return parsed
 
 
+class Template(Protocol):
+    def render(self, context: dict) -> str: ...
+
+
 @dataclass
 class Rule:
     name: str
     source: str
-    template: Any  # duck-typed: needs .render(context: dict) -> str
+    template: Template
 
 
 def render_rule(rule: Rule, context: dict) -> bool:
-    """Render ``rule`` against ``context``; True only on exact "True".
-
-    Any render error (e.g. an ordering comparison against a missing
-    value) or non-boolean output is treated as no-match, never as a
-    match — a broken rule can only ever keep jobs, never delete them.
-    """
     try:
         result = rule.template.render(context)
     except Exception:
@@ -172,11 +154,11 @@ def apply_aux_deltas(
 
 
 class _PreCommitFailure(Exception):
-    """The delete/update failed before commit; safely rolled back."""
+    pass
 
 
 class _CommitFailure(Exception):
-    """The commit itself failed; outcome on disk is unknown."""
+    pass
 
 
 _DELETE_SQL = "DELETE FROM job_history WHERE job_id = ?"
@@ -218,45 +200,6 @@ def build_update_rows(
 
 
 def delete_and_correct(conn, job_id: int, rows: list[dict]) -> None:
-    """Delete a job and correct totals atomically, on the DB thread.
-
-    Runs synchronously inside a single ``queue_callback`` so the
-    SAVEPOINT, the DELETE, and the UPDATEs are one item on Moonraker's
-    FIFO SQLite command queue — never interleaved with another
-    writer's statements. ``conn`` is duck-typed (any object exposing
-    ``execute``/``commit`` like ``sqlite3.Connection``) so tests can
-    substitute a thin proxy to force a commit failure.
-
-    Only the DELETE's row count is checked. A totals UPDATE matching
-    zero rows is not an error: it happens, by design, during the brief
-    window of a totals reset (History's own DELETE + INSERT on
-    job_totals are two separate queue items), and the reset's INSERT
-    is the correct outcome in that case.
-
-    The SAVEPOINT statement and the success-path RELEASE both live
-    *inside* the same try/except as the DELETE and UPDATEs — not just
-    after it — so that even a failure opening or releasing the
-    savepoint itself is classified as `_PreCommitFailure` rather than
-    propagating raw and leaving the caller's already-applied in-memory
-    totals delta un-reverted.
-
-    If the recovery `ROLLBACK TO`/`RELEASE` itself fails, the outcome
-    is genuinely unknown — the DELETE/UPDATEs may or may not have
-    landed — so that case is deliberately raised as `_CommitFailure`,
-    not `_PreCommitFailure`: `_delete_job` treats `_CommitFailure` as
-    "log and do not compensate," which is the only safe response when
-    we can no longer prove nothing was persisted. Treating a failed
-    rollback as safe-to-compensate would risk re-adding a totals delta
-    on top of a DELETE that actually committed.
-
-    A failure of the `SAVEPOINT` statement itself is a separate case:
-    if the savepoint never opened, no statement after it had a chance
-    to run, so there is nothing to roll back and the failure is always
-    safe to compensate — `savepoint_opened` tracks this so that case
-    goes straight to `_PreCommitFailure` without attempting (and
-    necessarily failing) a `ROLLBACK TO` a savepoint that was never
-    opened.
-    """
     savepoint_opened = False
     try:
         conn.execute("SAVEPOINT neuralyzer")
@@ -327,15 +270,9 @@ class Neuralyzer:
         try:
             await self.history.history_table.queue_callback(_run)
         except _PreCommitFailure:
-            # job_totals (the dict) is only ever replaced wholesale by a
-            # totals reset -- a normal finish_job() mutates it in place.
-            # aux_totals (the list), by contrast, is rebuilt as a new
-            # list object on *every* finish, so its identity can't be
-            # used as a reset signal: a reset is detected purely via
-            # job_totals, and the aux delta is re-added into whichever
-            # aux_totals list is current, at the index captured before
-            # the await (stable, since History rebuilds it in the same
-            # fixed field order every time).
+            # History replaces job_totals wholesale on a reset but mutates it in place
+            # on finish; aux_totals is rebuilt on every finish, so only job_totals
+            # identity signals a reset.
             reset_happened = self.history.job_totals is not job_totals_ref
             revert_job_fields: list[str] = []
             revert_aux_indices: list[int] = []
@@ -391,8 +328,8 @@ class Neuralyzer:
             return
         job_id = self.history.current_job_id
         if job_id is None:
-            # Moonraker assigns current_job_id only after an async DB save,
-            # so start gcode can signal first; the "added" event applies it.
+            # History sets current_job_id only after an awaited DB save, so start
+            # gcode can signal first; the "added" event applies it.
             self._early_signal_pending = True
             return
         self.tracked_jobs.add(job_id)
